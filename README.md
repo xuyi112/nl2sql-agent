@@ -1,6 +1,6 @@
 # NL2SQL 数据分析 Agent
 
-> 基于 LangGraph 状态图 + Schema RAG 的自然语言数据库查询系统
+> 基于 Schema RAG + 普通 Python 编排的自然语言数据库查询系统
 
 用户用自然语言提问,系统自动生成 SQL、安全审核、执行查询、返回可视化图表。
 
@@ -11,26 +11,30 @@
   ↓ POST /query
 FastAPI 后端 (app/main.py)
   ↓
-LangGraph 状态图 (agent/graph.py)
+普通 Python 编排 (agent/graph.py)
   ├── retrieve  → Schema RAG 检索(DDL/业务规则/示例SQL)
-  ├── generate  → LLM 生成 SQL
+  ├── generate  → LLM 生成 SQL(Function Calling 结构化输出)
   ├── validate  → 双层审核(规则层 + LLM复核)
   │     └── 失败 → 回炉重生成(最多2次)
-  ├── execute   → SQLite 执行
-  └── visualize → 自动图表决策
+  ├── execute   → SQLite 执行(失败也回炉)
+  ├── visualize → LLM 图表决策(bar/line/pie/table)
+  ├── followups → 相关追问生成
+  └── cache     → 结果缓存(数据版本检测自动失效)
   ↓
-JSON 响应 {sql, 审核结果, 数据, 图表配置}
+JSON 响应 {sql, 审核结果, 数据, 图表配置, 追问}
 ```
 
 ## 技术栈
 
 | 组件 | 技术 | 用途 |
 |---|---|---|
-| Agent 编排 | LangGraph | 状态图 + 条件边(回炉机制) |
+| Agent 编排 | 普通 Python 函数 + while 循环 | 流水线 + 回炉机制(零框架依赖) |
+| LLM 输出 | Function Calling | SQL/审核/图表/追问 结构化输出 |
 | 向量检索 | ChromaDB | Schema RAG:表结构/业务规则/示例SQL |
-| LLM | DeepSeek V4 Flash | SQL 生成 + 审核复核 |
+| LLM | DeepSeek V4 Flash | SQL 生成 + 审核复核 + 图表决策 |
 | 后端 | FastAPI | REST API + Swagger 文档 |
 | 数据库 | SQLite | 零依赖,本地运行 |
+| 缓存 | 内存 + 数据版本检测 | 相同问题秒回,数据变更自动失效 |
 
 ## 快速开始
 
@@ -90,9 +94,9 @@ curl -X POST http://localhost:8000/query \
 
 规则层先过滤明显危险,通过后才调LLM——省钱省时。
 
-### 3. LangGraph 自我纠错
+### 3. 自我纠错(回炉机制)
 
-审核失败 → 带错误信息回到 generate 节点重写 → 最多重试2次。
+审核失败或执行失败 → 带错误信息回到 generate 重写 → 最多重试2次。
 
 ```mermaid
 flowchart TD
@@ -101,7 +105,9 @@ flowchart TD
     C -->|失败且<2次| B
     C -->|重试够| F[fail]
     C -->|通过| E[execute]
+    E -->|执行失败且<2次| B
     E --> V[visualize]
+    V --> G[followups]
 ```
 
 ## API 文档
@@ -131,10 +137,15 @@ flowchart TD
 ```
 nl2sql_agent/
 ├── agent/
-│   ├── schema_rag.py    # Schema RAG:向量化检索
-│   └── graph.py         # LangGraph 状态图编排
+│   ├── schema_rag.py    # Schema RAG:向量化检索 + auto_train 自动学习
+│   ├── graph.py         # 普通 Python 编排(流水线 + 回炉循环)
+│   ├── sql_validator.py # 规则层审核(危险词/语法/白名单)
+│   ├── visualize.py     # LLM 图表决策(bar/line/pie/table)
+│   ├── cache.py         # 结果缓存(数据版本检测自动失效)
+│   └── evaluate.py      # 评测脚本(8类问题准确率)
 ├── app/
-│   └── main.py          # FastAPI 后端接口
+│   ├── main.py          # FastAPI 后端接口
+│   └── index.html       # 前端页面(ECharts 图表)
 ├── data/
 │   ├── gen_data.py      # 数据生成脚本
 │   └── ecommerce.db     # SQLite 数据库
@@ -146,7 +157,7 @@ nl2sql_agent/
 ## 简历故事
 
 > **项目一**证明我会「从文档里找答案」(RAG + 企业级工程化);
-> **项目二**证明我会「从数据里找答案」(LangGraph + NL2SQL + 安全审核 + 可视化),
+> **项目二**证明我会「从数据里找答案」(NL2SQL + 安全审核 + 可视化),
 > 两者都体现 LLM 应用开发能力,技术标签完全不同,形成互补。
 
 ### 技术标签对比
@@ -155,13 +166,16 @@ nl2sql_agent/
 |---|---|---|
 | 数据形态 | 非结构化文档 | 结构化数据库 |
 | 核心技术 | RAG 文档检索 | NL2SQL + 安全审核 |
-| 编排框架 | HelloAgents | LangGraph |
-| 输出 | 文字回答 | SQL + 图表 + 数据 |
-| 评测 | 主观准确性 | 客观测准率 |
+| 编排方式 | HelloAgents | 普通 Python 编排 + Function Calling |
+| 输出 | 文字回答 | SQL + 图表 + 数据 + 追问 |
+| 评测 | 主观准确性 | 客观测准率(8题100%) |
 
 ### 面试要点
 
-1. **Schema RAG**:DDL + 业务文档 + 问题SQL对 三类知识向量检索
-2. **LangGraph**:StateGraph + 条件边 + 自我纠错回炉机制
+1. **Schema RAG**:DDL + 业务文档 + 问题SQL对 三类知识向量检索 + auto_train 自动学习
+2. **Function Calling**:SQL/审核/图表/追问 全部结构化输出,消除解析脆弱性
 3. **SQL安全**:规则层(危险词/表名白名单/LIMIT) + LLM复核层 双层审核
-4. **可视化**:根据查询结果自动决策柱状图/折线图/表格
+4. **自我纠错**:审核失败/执行失败 → 带错误回炉重写(最多2次)
+5. **可视化**:LLM 决策柱状图/折线图/饼图/表格
+6. **缓存**:数据版本检测,相同问题秒回,数据变更自动失效
+7. **评测**:8 类典型问题 100% 通过
