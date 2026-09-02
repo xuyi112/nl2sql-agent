@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NL2SQL 数据分析助手</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+        h1 { color: #333; }
+        .input-area { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .input-area input { width: 70%; padding: 10px; font-size: 16px; border: 1px solid #ddd; border-radius: 4px; }
+        .input-area button { padding: 10px 20px; font-size: 16px; background: #1890ff; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        .input-area button:hover { background: #40a9ff; }
+        .result-area { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .sql-box { background: #f0f0f0; padding: 15px; border-radius: 4px; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 13px; }
+        .badge-pass { background: #d4edda; color: #155724; }
+        .badge-fail { background: #f8d7da; color: #721c24; }
+        #chart { width: 100%; height: 400px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background: #f0f0f0; }
+        .loading { color: #999; text-align: center; padding: 20px; }
+    </style>
+</head>
+<body>
+    <h1>🔍 NL2SQL 数据分析助手</h1>
+
+    <div class="input-area">
+        <input id="question" placeholder="请输入你的问题,如:华东区上月销售额Top3商品" />
+        <button onclick="query()">查询</button>
+    </div>
+
+    <div id="result" style="display:none;">
+        <div class="result-area">
+            <h3>生成的 SQL</h3>
+            <div id="sql" class="sql-box"></div>
+            <p>审核状态: <span id="badge" class="badge"></span></p>
+        </div>
+
+        <div class="result-area">
+            <h3>查询结果</h3>
+            <table id="table"></table>
+        </div>
+
+        <div class="result-area">
+            <h3>图表</h3>
+            <div id="chart"></div>
+        </div>
+    </div>
+
+    <div id="loading" style="display:none;" class="loading">⏳ 查询中,请稍候...</div>
+
+    <script>
+        const API_URL = '/query';
+
+        // 回车触发查询
+        document.getElementById('question').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') query();
+        });
+
+        async function query() {
+            const question = document.getElementById('question').value.trim();
+            if (!question) return;
+
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('result').style.display = 'none';
+
+            try {
+                const resp = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question }),
+                });
+                const data = await resp.json();
+                render(data);
+            } catch (e) {
+                alert('请求失败: ' + e.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        function render(data) {
+            document.getElementById('result').style.display = 'block';
+
+            // SQL
+            document.getElementById('sql').textContent = data.sql || '无';
+
+            // 审核状态
+            const badge = document.getElementById('badge');
+            if (data.validation_passed) {
+                badge.textContent = '✅ 通过';
+                badge.className = 'badge badge-pass';
+            } else {
+                badge.textContent = '❌ ' + (data.validation_errors[0] || '未通过');
+                badge.className = 'badge badge-fail';
+            }
+
+            // 表格
+            const table = document.getElementById('table');
+            if (data.result_columns && data.result_rows) {
+                let html = '<tr>' + data.result_columns.map(c => '<th>' + c + '</th>').join('') + '</tr>';
+                data.result_rows.forEach(row => {
+                    html += '<tr>' + row.map(c => '<td>' + c + '</td>').join('') + '</tr>';
+                });
+                table.innerHTML = html;
+            }
+
+            // 图表
+            const chart = echarts.init(document.getElementById('chart'));
+            const chartData = data.chart || {};
+            if (chartData.chart_type === 'bar' || chartData.chart_type === 'line') {
+                chart.setOption({
+                    title: { text: chartData.title || '', left: 'center' },
+                    tooltip: { trigger: 'axis' },
+                    xAxis: { type: 'category', data: chartData.labels || [] },
+                    yAxis: {
+                        type: 'value',
+                        name: chartData.y_label || '',
+                        axisLabel: { formatter: function(v) { return v.toLocaleString(); } },
+                    },
+                    series: [{
+                        type: chartData.chart_type,
+                        data: chartData.values || [],
+                        label: { show: true, position: 'top', formatter: function(p) { return p.value.toLocaleString(); } },
+                    }],
+                    grid: { left: '15%', right: '10%', bottom: '15%' },
+                });
+            } else if (chartData.chart_type === 'pie') {
+                chart.setOption({
+                    title: { text: chartData.title || '', left: 'center' },
+                    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+                    legend: { orient: 'vertical', left: 'left' },
+                    series: [{
+                        type: 'pie',
+                        radius: '60%',
+                        data: (chartData.labels || []).map((label, i) => ({
+                            name: label,
+                            value: (chartData.values || [])[i],
+                        })),
+                        label: { formatter: '{b}: {d}%' },
+                    }],
+                });
+            } else {
+                // 表格类型或无图表数据:显示提示
+                chart.setOption({
+                    title: { text: chartData.title || '查询结果', left: 'center', top: 'center' },
+                });
+            }
+        }
+    </script>
+</body>
+</html>
