@@ -98,7 +98,7 @@ git push
 | `feat:` | 新功能 | `feat: 新增缓存模块` |
 | `fix:` | 修复 bug | `fix: 修复缓存失效问题` |
 | `docs:` | 文档 | `docs: 更新 README` |
-| `refactor:` | 重构(不改功能) | `refactor: 优化审核逻辑` |
+| `refacto r:` | 重构(不改功能) | `refactor: 优化审核逻辑` |
 | `perf:` | 性能优化 | `perf: 加快检索速度` |
 | `test:` | 测试 | `test: 新增评测用例` |
 

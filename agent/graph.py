@@ -83,6 +83,26 @@ FOLLOWUP_TOOL = {
     },
 }
 
+# 工具 4:意图分类。LLM 判断问题属于哪类,决定走哪条处理路径。
+INTENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "classify_intent",
+        "description": "判断用户问题属于哪一类",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "enum": ["data_analysis", "inventory_query", "off_topic"],
+                    "description": "data_analysis=需要数据分析(聚合/对比/趋势/统计); inventory_query=了解有什么(列举/介绍商品或品类); off_topic=与电商数据无关(天气/闲聊/其他话题)",
+                }
+            },
+            "required": ["intent"],
+        },
+    },
+}
+
 
 # ---------- 1. State 定义:节点间共享的"流转单" ----------
 
@@ -90,9 +110,10 @@ class AgentState(TypedDict):
     """所有节点共享的状态字典。
 
     每个节点读自己需要的键、写自己产出的键,
-    LangGraph 会自动把节点返回的键合并进 state。
+    通过 state.update() 把节点返回的键合并进 state。
     """
     question: str            # 用户问题(起点写入)
+    intent: str              # 意图分类(data_analysis/inventory_query/off_topic)
     ddl_text: str            # 检索到的表结构(retrieve 写入)
     doc_text: str            # 检索到的业务规则(retrieve 写入)
     few_shot_text: str       # 检索到的示例 SQL(retrieve 写入)
@@ -474,22 +495,113 @@ def generate_followups(state: AgentState) -> list[str]:
 
 # ---------- 6. 普通 Python 编排(替代 LangGraph 图) ----------
 
-def run_agent(question: str) -> dict:
-    """普通 Python 版编排:retrieve → generate → validate → (回炉) → execute → visualize
+# ---------- 6.0 意图识别(入口分流) ----------
+
+OFF_TOPIC_REPLY = (
+    "不好意思,这个问题不在我的回答范围内哦~ "
+    "我是电商数据分析助手,可以帮你查询商品、订单、销售额等数据。"
+    "比如你可以问我:\n"
+    "- 华东区上月销售额Top3商品\n"
+    "- 全国各区域订单量\n"
+    "- 最贵的5个商品\n"
+    "- 上季度各品类销售额"
+)
+
+
+def _classify_intent(question: str) -> str:
+    """意图分类:LLM 判断问题属于 data_analysis / inventory_query / off_topic。
+
+    失败时默认 data_analysis(走完整流程,保证不丢问题)。
+    """
+    try:
+        prompt = f"""你是意图分类器。请判断用户问题属于哪一类:
+- data_analysis:需要数据分析(聚合/对比/趋势/统计/排名)
+- inventory_query:了解有什么(列举/介绍商品、品类、表内容)
+- off_topic:与电商数据无关(天气/闲聊/其他话题)
+
+【用户问题】
+{question}
+
+请调用 classify_intent 工具提交分类结果。"""
+        response = llm.invoke(prompt, tools=[INTENT_TOOL])
+        for call in response.tool_calls:
+            if call.get("name") == "classify_intent":
+                args = call.get("args", {})
+                if isinstance(args, str):
+                    args = json.loads(args)
+                intent = args.get("intent", "")
+                if intent in ("data_analysis", "inventory_query", "off_topic"):
+                    return intent
+    except Exception as e:
+        print(f"⚠️ 意图分类失败,默认 data_analysis: {e}")
+    return "data_analysis"
+
+
+def _answer_inventory(question: str) -> str:
+    """了解性问题:LLM 根据数据库表结构直接回答(不执行 SQL)。
+
+    例:"商品有什么" → 根据 DDL 列举商品/品类。
+    """
+    try:
+        ctx = rag_retrieve(question, top_k=2)
+        prompt = f"""你是电商数据分析助手。用户想了解数据库里有什么,请根据表结构直接回答,不要写 SQL。
+
+【数据库表结构】
+{ctx['ddl_text']}
+
+【用户问题】
+{question}
+
+请用简洁的中文回答,列举数据库里有什么(表/商品/品类等)。"""
+        response = llm.invoke(prompt)
+        return response.content.strip()
+    except Exception as e:
+        print(f"⚠️ 了解性回答失败: {e}")
+        return "抱歉,我暂时无法回答这个问题,请换个问法试试。"
+
+
+def run_agent(question: str, enable_auto_train: bool = True) -> dict:
+    """普通 Python 版编排:意图识别 → (data_analysis) retrieve → generate → validate → execute → visualize
+
+    意图分流:
+    - data_analysis:完整数据分析流程(SQL + 图表 + 追问)
+    - inventory_query:LLM 直接回答(不查 SQL)
+    - off_topic:礼貌拒绝 + 引导
 
     回炉条件(最多 2 次):
     - 审核失败(规则层或 LLM 复核)
     - 审核通过但执行失败(运行时错误,如除零/类型不匹配)
 
     缓存:相同问题(非相对时间)直接返回上次结果,省 API 费用。
+    enable_auto_train: 是否自动学习(评测时建议关闭,避免污染知识库)。
     """
-    # 0. 缓存检查:相同问题直接返回上次结果(相对时间问题自动跳过)
+    # 0. 意图识别:先判断问题类型
+    intent = _classify_intent(question)
+    print(f"🎯 意图识别: {intent}")
+
+    # 0.1 无关问题:礼貌拒绝 + 引导
+    if intent == "off_topic":
+        return {
+            "question": question,
+            "intent": "off_topic",
+            "answer": OFF_TOPIC_REPLY,
+        }
+
+    # 0.2 了解性问题:LLM 直接回答(不查 SQL)
+    if intent == "inventory_query":
+        return {
+            "question": question,
+            "intent": "inventory_query",
+            "answer": _answer_inventory(question),
+        }
+
+    # 0.3 缓存检查:相同问题直接返回上次结果(相对时间问题自动跳过)
     cached = get_cached(question)
     if cached:
         print(f"⚡ 缓存命中: {question}")
         return cached
 
-    state: AgentState = {"question": question, "retry_count": 0}
+    state: AgentState = {"question": question, "retry_count": 0, "intent": "data_analysis"}
 
     # 1. 检索
     state.update(retrieve_node(state))
@@ -512,7 +624,8 @@ def run_agent(question: str) -> dict:
         return state
 
     # 4. auto_train:执行成功 → 把 (问题, SQL) 自动入库,系统越用越聪明
-    add_question_sql_pair(state["question"], state["generated_sql"])
+    if enable_auto_train:
+        add_question_sql_pair(state["question"], state["generated_sql"])
 
     state.update(visualize_node(state))
 

@@ -33,18 +33,23 @@
     </div>
 
     <div id="result" style="display:none;">
-        <div class="result-area">
+        <div id="answer-section" class="result-area" style="display:none;">
+            <h3>回答</h3>
+            <div id="answer" class="sql-box" style="white-space:pre-wrap;"></div>
+        </div>
+
+        <div id="sql-section" class="result-area">
             <h3>生成的 SQL</h3>
             <div id="sql" class="sql-box"></div>
             <p>审核状态: <span id="badge" class="badge"></span></p>
         </div>
 
-        <div class="result-area">
+        <div id="table-section" class="result-area">
             <h3>查询结果</h3>
             <table id="table"></table>
         </div>
 
-        <div class="result-area">
+        <div id="chart-section" class="result-area">
             <h3>图表</h3>
             <div id="chart"></div>
         </div>
@@ -84,6 +89,25 @@
 
         function render(data) {
             document.getElementById('result').style.display = 'block';
+
+            // 意图分流:off_topic / inventory_query → 只显示文字回答
+            if (data.intent === 'off_topic' || data.intent === 'inventory_query') {
+                // 隐藏 SQL/审核/表格/图表区域,显示回答
+                document.getElementById('sql-section').style.display = 'none';
+                document.getElementById('badge-section').style.display = 'none';
+                document.getElementById('table-section').style.display = 'none';
+                document.getElementById('chart-section').style.display = 'none';
+                document.getElementById('answer-section').style.display = 'block';
+                document.getElementById('answer').textContent = data.answer || '';
+                return;
+            }
+
+            // 数据分析:显示所有区域
+            document.getElementById('sql-section').style.display = 'block';
+            document.getElementById('badge-section').style.display = 'block';
+            document.getElementById('table-section').style.display = 'block';
+            document.getElementById('chart-section').style.display = 'block';
+            document.getElementById('answer-section').style.display = 'none';
 
             // SQL
             document.getElementById('sql').textContent = data.sql || '无';

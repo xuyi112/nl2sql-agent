@@ -89,6 +89,9 @@ BUSINESS_DOCS = {
     "销售额Top": "销售额TopN = 按 SUM(amount) 降序取前 N 条,用 ORDER BY ... DESC LIMIT N",
     "订单量": "订单量 = COUNT(*) 或 COUNT(orders.id)",
     "客单价": "客单价 = SUM(amount) / COUNT(*),即总金额除以订单数",
+    "平均价格": "商品平均价格 = AVG(products.price),直接对商品表的价格列求平均,不要用订单表的 amount 计算",
+    "商品数量": "商品数量 = COUNT(*) FROM products,统计商品表行数",
+    "价格区间": "价格区间查询用 products.price 的 BETWEEN 或 > / < 比较",
 }
 
 # 问题-SQL 对:人工精选的 few-shot 示例(每类问题 1 条)
@@ -101,8 +104,8 @@ QUESTION_SQL_PAIRS = [
            JOIN products p ON o.product_id = p.id
            JOIN regions r ON o.region_id = r.id
            WHERE r.name = '华东'
-             AND o.order_date >= '2026-07-01'
-             AND o.order_date <= '2026-07-31'
+             AND o.order_date >= '2026-08-01'
+             AND o.order_date <= '2026-08-31'
            GROUP BY p.name
            ORDER BY sales DESC
            LIMIT 3""",

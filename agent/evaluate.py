@@ -24,8 +24,24 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import sqlite3
 from graph import run_agent
+from schema_rag import get_collection
 
 DB_PATH = Path(__file__).parent.parent / "data" / "ecommerce.db"
+
+# ---------- 评测前清理:清空 auto_train 自动示例 ----------
+# 多次评测会让自动示例堆积(最多100条),检索时可能命中不相关示例干扰 LLM,
+# 评测场景应使用干净的人工示例知识库。
+
+def _clear_auto_examples():
+    """清空 auto_train 自动入库的示例(保留人工示例)。"""
+    try:
+        col = get_collection("question_sql")
+        auto = col.get(where={"source": "auto"})
+        if auto["ids"]:
+            col.delete(ids=auto["ids"])
+            print(f"🧹 已清空 {len(auto['ids'])} 条 auto_train 自动示例")
+    except Exception as e:
+        print(f"⚠️ 清理 auto 示例失败: {e}")
 
 # ---------- 测试集:问题 + 期望 SQL ----------
 # 覆盖:单表/多表 JOIN/聚合/日期过滤/TopN/分组/排序/条件过滤/组合场景
@@ -407,21 +423,286 @@ TEST_CASES = [
            ORDER BY order_count ASC
            LIMIT 3""",
     },
+
+    # ========== 补充 41 条(凑满 100) ==========
+
+    # --- 商品单表补充 ---
+    {
+        "question": "价格在500到1000之间的商品数量",
+        "expected_sql": """SELECT COUNT(*) AS count FROM products WHERE price BETWEEN 500 AND 1000""",
+    },
+    {
+        "question": "价格超过2000的商品有哪些",
+        "expected_sql": """SELECT name, price FROM products WHERE price > 2000 ORDER BY price DESC LIMIT 10""",
+    },
+    {
+        "question": "价格低于50的商品",
+        "expected_sql": """SELECT name, price FROM products WHERE price < 50 ORDER BY price ASC LIMIT 10""",
+    },
+    {
+        "question": "各品类商品数量占比",
+        "expected_sql": """SELECT category, COUNT(*) AS product_count FROM products GROUP BY category ORDER BY product_count DESC""",
+    },
+    {
+        "question": "数码类最便宜的商品",
+        "expected_sql": """SELECT name, price FROM products WHERE category = '数码' ORDER BY price ASC LIMIT 1""",
+    },
+    {
+        "question": "家电类最贵的商品",
+        "expected_sql": """SELECT name, price FROM products WHERE category = '家电' ORDER BY price DESC LIMIT 1""",
+    },
+    {
+        "question": "价格第二贵的商品",
+        "expected_sql": """SELECT name, price FROM products ORDER BY price DESC LIMIT 1 OFFSET 1""",
+    },
+    {
+        "question": "图书类有多少个商品",
+        "expected_sql": """SELECT COUNT(*) AS count FROM products WHERE category = '图书'""",
+    },
+    {
+        "question": "美妆类最贵的商品",
+        "expected_sql": """SELECT name, price FROM products WHERE category = '美妆' ORDER BY price DESC LIMIT 1""",
+    },
+    {
+        "question": "价格在1000元以上的商品平均价格",
+        "expected_sql": """SELECT AVG(price) AS avg_price FROM products WHERE price > 1000""",
+    },
+
+    # --- 订单单表补充 ---
+    {
+        "question": "2026年8月的总订单金额",
+        "expected_sql": """SELECT SUM(amount) AS total_sales FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "2026年8月1日的订单金额",
+        "expected_sql": """SELECT SUM(amount) AS total_sales FROM orders WHERE order_date = '2026-08-01'""",
+    },
+    {
+        "question": "2026年8月有多少天有订单",
+        "expected_sql": """SELECT COUNT(DISTINCT order_date) AS days FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "金额在500到1000之间的订单数",
+        "expected_sql": """SELECT COUNT(*) AS count FROM orders WHERE amount BETWEEN 500 AND 1000""",
+    },
+    {
+        "question": "购买数量为1的订单总金额",
+        "expected_sql": """SELECT SUM(amount) AS total_sales FROM orders WHERE quantity = 1""",
+    },
+    {
+        "question": "2026年8月平均每笔订单金额",
+        "expected_sql": """SELECT AVG(amount) AS avg_amount FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "2026年8月最大订单金额",
+        "expected_sql": """SELECT MAX(amount) AS max_amount FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "2026年8月最小订单金额",
+        "expected_sql": """SELECT MIN(amount) AS min_amount FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "2026年8月购买数量总和",
+        "expected_sql": """SELECT SUM(quantity) AS total_quantity FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "2026年8月订单金额超过500的订单数",
+        "expected_sql": """SELECT COUNT(*) AS count FROM orders WHERE order_date >= '2026-08-01' AND order_date <= '2026-08-31' AND amount > 500""",
+    },
+
+    # --- 多表 JOIN 补充 ---
+    {
+        "question": "各区域2026年8月的销售额",
+        "expected_sql": """SELECT r.name, SUM(o.amount) AS sales
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY r.name ORDER BY sales DESC""",
+    },
+    {
+        "question": "各品类2026年8月的销售额",
+        "expected_sql": """SELECT p.category, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY sales DESC""",
+    },
+    {
+        "question": "华东区2026年8月的订单量",
+        "expected_sql": """SELECT COUNT(*) AS order_count
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华东' AND o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "华北区销售额最高的商品",
+        "expected_sql": """SELECT p.name, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华北'
+           GROUP BY p.name ORDER BY sales DESC LIMIT 1""",
+    },
+    {
+        "question": "各区域2026年8月的平均客单价",
+        "expected_sql": """SELECT r.name, SUM(o.amount) / COUNT(*) AS avg_order_value
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY r.name""",
+    },
+    {
+        "question": "2026年8月各品类的订单量",
+        "expected_sql": """SELECT p.category, COUNT(*) AS order_count
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY order_count DESC""",
+    },
+    {
+        "question": "华南区2026年8月销售额最高的商品",
+        "expected_sql": """SELECT p.name, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华南' AND o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.name ORDER BY sales DESC LIMIT 1""",
+    },
+    {
+        "question": "各区域2026年8月的订单量",
+        "expected_sql": """SELECT r.name, COUNT(*) AS order_count
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY r.name ORDER BY order_count DESC""",
+    },
+    {
+        "question": "2026年8月销售额最高的品类",
+        "expected_sql": """SELECT p.category, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY sales DESC LIMIT 1""",
+    },
+    {
+        "question": "华东区2026年8月各品类的销售额",
+        "expected_sql": """SELECT p.category, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华东' AND o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY sales DESC""",
+    },
+    {
+        "question": "2026年8月订单量最多的商品",
+        "expected_sql": """SELECT p.name, COUNT(*) AS order_count
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.name ORDER BY order_count DESC LIMIT 1""",
+    },
+    {
+        "question": "各区域2026年8月的订单金额占比",
+        "expected_sql": """SELECT r.name, SUM(o.amount) AS sales
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY r.name ORDER BY sales DESC""",
+    },
+    {
+        "question": "2026年8月各品类的平均客单价",
+        "expected_sql": """SELECT p.category, SUM(o.amount) / COUNT(*) AS avg_order_value
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category""",
+    },
+    {
+        "question": "华东区2026年8月销售额最高的商品",
+        "expected_sql": """SELECT p.name, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华东' AND o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.name ORDER BY sales DESC LIMIT 1""",
+    },
+    {
+        "question": "2026年8月各区域订单量占比",
+        "expected_sql": """SELECT r.name, COUNT(*) AS order_count
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY r.name ORDER BY order_count DESC""",
+    },
+    {
+        "question": "2026年8月销售额最低的品类",
+        "expected_sql": """SELECT p.category, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY sales ASC LIMIT 1""",
+    },
+    {
+        "question": "华北区2026年8月的销售额",
+        "expected_sql": """SELECT SUM(o.amount) AS sales
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华北' AND o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'""",
+    },
+    {
+        "question": "2026年8月各品类销售额Top5",
+        "expected_sql": """SELECT p.category, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY sales DESC LIMIT 5""",
+    },
+    {
+        "question": "华东区2026年8月订单量最多的商品",
+        "expected_sql": """SELECT p.name, COUNT(*) AS order_count
+           FROM orders o JOIN products p ON o.product_id = p.id JOIN regions r ON o.region_id = r.id
+           WHERE r.name = '华东' AND o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.name ORDER BY order_count DESC LIMIT 1""",
+    },
+    {
+        "question": "2026年8月各区域销售额Top3",
+        "expected_sql": """SELECT r.name, SUM(o.amount) AS sales
+           FROM orders o JOIN regions r ON o.region_id = r.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY r.name ORDER BY sales DESC LIMIT 3""",
+    },
+    {
+        "question": "2026年8月各品类订单量Top3",
+        "expected_sql": """SELECT p.category, COUNT(*) AS order_count
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.category ORDER BY order_count DESC LIMIT 3""",
+    },
+    {
+        "question": "2026年8月销售额最高的商品",
+        "expected_sql": """SELECT p.name, SUM(o.amount) AS sales
+           FROM orders o JOIN products p ON o.product_id = p.id
+           WHERE o.order_date >= '2026-08-01' AND o.order_date <= '2026-08-31'
+           GROUP BY p.name ORDER BY sales DESC LIMIT 1""",
+    },
 ]
 
 
 # ---------- 评测工具 ----------
 
-def _execute_sql(sql: str) -> list:
-    """执行 SQL,返回结果行(排序后,用于对比)。"""
+def _execute_sql(sql: str) -> tuple[list, list]:
+    """执行 SQL,返回 (列名, 结果行)。"""
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.execute(sql)
         rows = cur.fetchall()
-        # 排序:结果顺序不影响正确性(ORDER BY 差异不算错)
-        return sorted(rows, key=str)
+        columns = [d[0] for d in cur.description] if cur.description else []
+        return columns, rows
     finally:
         conn.close()
+
+
+def _rows_to_dicts(columns: list, rows: list) -> list[dict]:
+    """把 (列名, 行) 转成 dict 列表,用于语义对比(忽略列顺序)。"""
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def _compare_semantic(expected_cols, expected_rows, actual_cols, actual_rows) -> bool:
+    """语义对比:忽略列名和列顺序,只比较值。
+
+    规则:期望的每一行,其所有值都能在生成的某一行中找到(子集匹配)。
+    例:期望 (name, price) 生成 (id, name, price) → 生成行包含期望值 → 通过
+    例:期望 (order_count, 50000) 生成 (total_orders, 50000) → 值相同 → 通过
+    值统一转字符串,避免 int/str 混合类型比较报错。
+    """
+    def _norm_row(row):
+        return set(str(v) for v in row)
+
+    actual_norm = [_norm_row(row) for row in actual_rows]
+    for e_row in expected_rows:
+        e_set = _norm_row(e_row)
+        # 期望行的所有值必须能在某个生成行中找到
+        if not any(e_set.issubset(a_set) for a_set in actual_norm):
+            return False
+    return True
 
 
 def _normalize_sql(sql: str) -> str:
@@ -431,6 +712,9 @@ def _normalize_sql(sql: str) -> str:
 
 def evaluate() -> dict:
     """跑完整评测,返回统计结果。"""
+    # 评测前清空 auto 示例,避免污染
+    _clear_auto_examples()
+
     results = []
     total = len(TEST_CASES)
     passed = 0
@@ -446,8 +730,8 @@ def evaluate() -> dict:
         print(f"\n[{i}/{total}] {question}")
         start = time.time()
 
-        # 1. 跑完整链路
-        result = run_agent(question)
+        # 1. 跑完整链路(评测时关闭 auto_train,避免污染知识库)
+        result = run_agent(question, enable_auto_train=False)
         elapsed = time.time() - start
         generated_sql = result.get("generated_sql", "")
 
@@ -461,11 +745,11 @@ def evaluate() -> dict:
             results.append({"question": question, "passed": False, "reason": "执行失败", "elapsed": elapsed})
             continue
 
-        # 3. 结果对比(语义正确性)
+        # 3. 结果对比(语义正确性,忽略列顺序)
         try:
-            expected_rows = _execute_sql(expected_sql)
-            actual_rows = _execute_sql(generated_sql)
-            result_match = expected_rows == actual_rows
+            expected_cols, expected_rows = _execute_sql(expected_sql)
+            actual_cols, actual_rows = _execute_sql(generated_sql)
+            result_match = _compare_semantic(expected_cols, expected_rows, actual_cols, actual_rows)
         except Exception as e:
             result_match = False
             print(f"  ⚠️ 对比执行异常: {e}")

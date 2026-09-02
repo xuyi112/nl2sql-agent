@@ -51,12 +51,14 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     """响应体:完整结果"""
     question: str
-    sql: str
-    validation_passed: bool
-    validation_errors: list
-    result_columns: list
-    result_rows: list
-    chart: dict
+    intent: str = "data_analysis"
+    answer: str = ""
+    sql: str = ""
+    validation_passed: bool = False
+    validation_errors: list = []
+    result_columns: list = []
+    result_rows: list = []
+    chart: dict = {}
     followup_questions: list = []
 
 
@@ -68,6 +70,8 @@ async def query(req: QueryRequest):
     result = run_agent(req.question)
     return QueryResponse(
         question=req.question,
+        intent=result.get("intent", "data_analysis"),
+        answer=result.get("answer", ""),
         sql=result.get("generated_sql", ""),
         validation_passed=result.get("validation_passed", False),
         validation_errors=result.get("validation_errors", []),
