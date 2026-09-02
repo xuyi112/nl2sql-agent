@@ -128,6 +128,9 @@ def retrieve_node(state: AgentState) -> dict:
 
 def _build_sql_prompt(state: AgentState) -> str:
     """把 state 里的三段上下文 + 用户问题,拼成发给 LLM 的完整 prompt。"""
+    from datetime import date
+
+    today = date.today().isoformat()  # 当前日期,如 2026-09-02
     # 如果有上次审核错误,带上让 LLM 修正(回炉时才有)
     error_hint = ""
     if state.get("validation_errors"):
@@ -141,6 +144,8 @@ def _build_sql_prompt(state: AgentState) -> str:
 {state['execution_error']}
 """
     return f"""你是电商数据分析专家。请根据以下数据库信息,为用户问题生成一条 SQLite SQL 查询。
+
+【当前日期】{today}(今天是这一天,判断"上月/上季度"等相对时间时以此为准)
 
 【数据库表结构】
 {state['ddl_text']}
@@ -255,9 +260,14 @@ def _rule_check(sql: str) -> list[str]:
             errors.append(f"引用了不存在的表 '{t}'")
 
     # 4. 强制 LIMIT:防止一次拉回全表(数据量大的保护)
-    #    聚合查询(GROUP BY)豁免:返回的是汇总数据,通常行数不多
+    #    聚合查询豁免:返回的是汇总数据,通常行数不多
+    #    - GROUP BY 聚合(COUNT/SUM 按组) → 豁免
+    #    - 聚合函数无 GROUP BY(COUNT(*)/SUM/AVG/MIN/MAX 返回单行) → 豁免
     has_group_by = "group by" in sql_lower
-    if not has_group_by and "limit" not in sql_lower:
+    has_agg_func = any(
+        f"{fn}(" in sql_lower for fn in ["count", "sum", "avg", "min", "max"]
+    )
+    if not has_group_by and not has_agg_func and "limit" not in sql_lower:
         errors.append("查询缺少 LIMIT 限制,请加上 LIMIT")
 
     return errors
